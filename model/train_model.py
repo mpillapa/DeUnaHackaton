@@ -410,17 +410,37 @@ def _nba_desde_driver(driver: str, shap_val: float, nivel: str) -> str:
 # Si el comercio está en riesgo alto, el CLV se ajusta por probabilidad de retención
 MARGEN_SOBRE_TPV = 0.01
 
-# Mapa merchant_id → region (desde dim_merchants)
-df_merchants_raw = pd.read_csv(PATH_MERCHANTS, usecols=["merchant_id", "region"])
-region_map = dict(zip(df_merchants_raw["merchant_id"], df_merchants_raw["region"]))
+# Datos enriquecidos desde dim_merchants
+df_merchants_raw = pd.read_csv(PATH_MERCHANTS, usecols=[
+    "merchant_id", "region", "nombre_comercio", "segmento_comercial",
+    "tipo_negocio_desc", "latitud", "longitud", "fecha_onboarding",
+])
+df_merchants_raw["mes_onboarding"] = pd.to_datetime(
+    df_merchants_raw["fecha_onboarding"]
+).dt.to_period("M").astype(str)
+merchants_map = df_merchants_raw.set_index("merchant_id")
+
+# tpv_mensual_promedio desde fact_performance_monthly
+df_perf_raw = pd.read_csv(PATH_PERFORMANCE, usecols=["merchant_id", "tpv_mensual"])
+tpv_promedio_map = df_perf_raw.groupby("merchant_id")["tpv_mensual"].mean().round(2)
+
+def _get(col, mid, default=None):
+    return merchants_map.at[mid, col] if mid in merchants_map.index else default
 
 df_predicciones = pd.DataFrame({
-    "merchant_id":        merchant_ids,
-    "fecha_snapshot":     FECHA_SNAPSHOT.date(),
-    "modelo_version":     MODELO_VERSION,
-    "probabilidad_churn": probas_all.round(4),
-    "nivel_riesgo":       niveles,
-    "region":             [region_map.get(mid, "") for mid in merchant_ids],
+    "merchant_id":          merchant_ids,
+    "nombre_comercio":      [_get("nombre_comercio", m) for m in merchant_ids],
+    "segmento_comercial":   [_get("segmento_comercial", m) for m in merchant_ids],
+    "tipo_negocio_desc":    [_get("tipo_negocio_desc", m) for m in merchant_ids],
+    "region":               [_get("region", m) for m in merchant_ids],
+    "latitud":              [_get("latitud", m) for m in merchant_ids],
+    "longitud":             [_get("longitud", m) for m in merchant_ids],
+    "mes_onboarding":       [_get("mes_onboarding", m) for m in merchant_ids],
+    "tpv_mensual_promedio": [tpv_promedio_map.get(m, 0.0) for m in merchant_ids],
+    "fecha_snapshot":       FECHA_SNAPSHOT.date(),
+    "modelo_version":       MODELO_VERSION,
+    "probabilidad_churn":   probas_all.round(4),
+    "nivel_riesgo":         niveles,
 })
 
 # Agregar drivers
