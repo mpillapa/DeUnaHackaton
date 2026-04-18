@@ -410,12 +410,17 @@ def _nba_desde_driver(driver: str, shap_val: float, nivel: str) -> str:
 # Si el comercio está en riesgo alto, el CLV se ajusta por probabilidad de retención
 MARGEN_SOBRE_TPV = 0.01
 
+# Mapa merchant_id → region (desde dim_merchants)
+df_merchants_raw = pd.read_csv(PATH_MERCHANTS, usecols=["merchant_id", "region"])
+region_map = dict(zip(df_merchants_raw["merchant_id"], df_merchants_raw["region"]))
+
 df_predicciones = pd.DataFrame({
     "merchant_id":        merchant_ids,
     "fecha_snapshot":     FECHA_SNAPSHOT.date(),
     "modelo_version":     MODELO_VERSION,
     "probabilidad_churn": probas_all.round(4),
     "nivel_riesgo":       niveles,
+    "region":             [region_map.get(mid, "") for mid in merchant_ids],
 })
 
 # Agregar drivers
