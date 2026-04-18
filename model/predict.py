@@ -1,8 +1,13 @@
 """Scoring y segmentación de churn para el equipo comercial.
 
-Replica la lógica de segmentación del flujo Databricks de referencia (Alerta Roja/
-Amarilla/Baja/Muy Baja) sobre el percent_rank de la probabilidad de inactivación.
-Genera outputs/predictions.csv consumible por el dashboard.
+Genera `outputs/predictions.csv` con:
+    merchant_id, fecha_corte, probabilidad_churn, prob_rank,
+    segmento_churn (ALERTA_ROJA / AMARILLA / BAJA / MUY_BAJA),
+    segmento_comercial, region, tipo_negocio_desc, tenure_meses,
+    tpv_sum_6m, tx_sum_6m, recencia_bucket_0, ejecutivo_cuenta.
+
+La segmentación sigue los percentiles del flujo Databricks de referencia
+(95 / 89 / 82), haciéndola independiente del volumen absoluto de la cartera.
 """
 from __future__ import annotations
 
@@ -33,30 +38,37 @@ def _segmentar(prob_rank: float) -> str:
     return "MUY_BAJA_PROBABILIDAD"
 
 
-def score(
-    mdt_path: str | Path | None = None,
-    model_path: str | Path | None = None,
-    out_path: str | Path | None = None,
-) -> pd.DataFrame:
-    mdt_path = Path(mdt_path) if mdt_path else PATHS.MDT
-    model_path = Path(model_path) if model_path else PATHS.MODEL_PKL
-    out_path = Path(out_path) if out_path else PATHS.PREDICTIONS
+def score(mdt_path: str | Path | None = None,
+          model_path: str | Path | None = None,
+          merchants_path: str | Path | None = None,
+          out_path: str | Path | None = None) -> pd.DataFrame:
+    mdt_path       = Path(mdt_path)       if mdt_path       else PATHS.MDT
+    model_path     = Path(model_path)     if model_path     else PATHS.MODEL_PKL
+    merchants_path = Path(merchants_path) if merchants_path else PATHS.DIM_MERCHANTS
+    out_path       = Path(out_path)       if out_path       else PATHS.PREDICTIONS
 
-    mdt = pd.read_parquet(mdt_path)
+    mdt      = pd.read_parquet(mdt_path)
     pipeline = joblib.load(model_path)
+    merchants = pd.read_csv(merchants_path)
 
     X, _, _, _ = split_features(mdt)
     proba = pipeline.predict_proba(X)[:, 1]
 
-    out = mdt[["comercio_id", "fecha_corte"]].copy()
+    out = mdt[["merchant_id", "fecha_corte"]].copy()
     out["probabilidad_churn"] = proba
-    out["prob_rank"] = out["probabilidad_churn"].rank(pct=True)
-    out["segmento_churn"] = out["prob_rank"].apply(_segmentar)
+    out["prob_rank"]          = out["probabilidad_churn"].rank(pct=True)
+    out["segmento_churn"]     = out["prob_rank"].apply(_segmentar)
 
+    # Enriquecer con variables de negocio para el dashboard
     out = out.merge(
-        mdt[["comercio_id", "mcc_segmento", "region", "tipo_persona", "tenure_meses",
-             "volumen_sum_6m", "tx_sum_6m", "recencia_bucket_0"]],
-        on="comercio_id",
+        mdt[["merchant_id", "segmento_comercial", "region", "tipo_negocio_desc",
+             "tenure_meses", "tpv_sum_6m", "tx_sum_6m", "recencia_bucket_0"]],
+        on="merchant_id",
+        how="left",
+    )
+    out = out.merge(
+        merchants[["merchant_id", "nombre_comercio", "ciudad", "ejecutivo_cuenta"]],
+        on="merchant_id",
         how="left",
     )
 
@@ -68,11 +80,11 @@ def score(
     print(f"\nPredicciones guardadas en: {out_path}")
     print("\nDistribución por segmento:")
     print(out["segmento_churn"].value_counts().to_string())
-    print(f"\nTop 10 comercios en riesgo:")
+    print("\nTop 10 comercios en riesgo:")
     print(
         out.head(10)[
-            ["comercio_id", "probabilidad_churn", "segmento_churn",
-             "mcc_segmento", "region", "volumen_sum_6m"]
+            ["merchant_id", "nombre_comercio", "probabilidad_churn",
+             "segmento_churn", "segmento_comercial", "region", "tpv_sum_6m"]
         ].to_string(index=False)
     )
     return out

@@ -170,10 +170,20 @@ def calcular_salud_latente(row: pd.Series) -> float:
     return float(np.clip(score, 0.01, 0.99))
 
 
+# Tasa de ruido en la etiqueta. Ajusta la "ambigüedad" de la ground truth:
+# 2% de churners que se comportan como sanos y 2% de sanos que parecen churners.
+# Refleja imperfección del observador (migración de POS, rebranding, etc.).
+TASA_RUIDO_ETIQUETA = 0.02
+
+
 def asignar_abandono(df_merchants: pd.DataFrame) -> pd.DataFrame:
     """
     Asigna etiqueta 'abandono_30d' respetando la tasa objetivo (~13%).
     Los comercios con menor salud latente son los candidatos.
+
+    Incluye ruido de etiqueta (2% por clase) para simular la imperfección
+    del observador: no toda la historia disponible es perfectamente
+    informativa del resultado.
     """
     df = df_merchants.copy()
     np.random.seed(SEED)
@@ -195,6 +205,25 @@ def asignar_abandono(df_merchants: pd.DataFrame) -> pd.DataFrame:
     )
     df["abandono_30d"] = 0
     df.loc[churners_idx, "abandono_30d"] = 1
+
+    # 3. Ruido de etiqueta: flip ~2% de cada clase.
+    #    Esto rompe la separabilidad perfecta y fuerza al modelo a tolerar
+    #    una tasa irreducible de error (Bayes error rate).
+    churners_pool = df.index[df["abandono_30d"] == 1]
+    sanos_pool    = df.index[df["abandono_30d"] == 0]
+
+    n_flip_ch = max(1, int(len(churners_pool) * TASA_RUIDO_ETIQUETA))
+    n_flip_sn = max(1, int(len(sanos_pool)    * TASA_RUIDO_ETIQUETA))
+
+    flip_ch = np.random.choice(churners_pool, size=n_flip_ch, replace=False)
+    flip_sn = np.random.choice(sanos_pool,    size=n_flip_sn, replace=False)
+
+    df.loc[flip_ch, "abandono_30d"] = 0   # churner → parece sano
+    df.loc[flip_sn, "abandono_30d"] = 1   # sano    → parece churner
+
+    # Marcamos los ruidosos en una columna auxiliar (no se exporta al CSV final)
+    df["_etiqueta_ruidosa"] = 0
+    df.loc[flip_ch.tolist() + flip_sn.tolist(), "_etiqueta_ruidosa"] = 1
 
     return df
 
@@ -541,7 +570,7 @@ if __name__ == "__main__":
 
     fact_csv_path = output_dir / "fact_performance_monthly.csv"
     fact_parquet_path = output_dir / "fact_performance_monthly.parquet"
-    merchants_out_path = output_dir / "dim_merchants_con_abandono.csv"
+    labels_csv_path = output_dir / "churn_labels.csv"
 
     df_fact.to_csv(fact_csv_path, index=False, encoding="utf-8")
     try:
@@ -550,8 +579,10 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"\n✓ Guardado: {fact_csv_path.name} (parquet no disponible: {e})")
 
-    # 6. Guardar también dim_merchants actualizado con la etiqueta ground truth
-    #    (quitamos la variable oculta _salud_latente: nunca debe llegar al modelo)
-    df_merchants_out = df_merchants.drop(columns=["_salud_latente"])
-    df_merchants_out.to_csv(merchants_out_path, index=False, encoding="utf-8")
-    print(f"✓ Guardado: {merchants_out_path.name} (con la columna abandono_30d añadida)")
+    # 6. Guardar etiqueta ground truth en archivo separado.
+    #    dim_merchants.csv queda limpio (solo features) — es lo que tendrá el modelo
+    #    en producción. churn_labels.csv solo se usa para calibrar/entrenar.
+    df_labels = df_merchants[["merchant_id", "abandono_30d"]].copy()
+    df_labels.to_csv(labels_csv_path, index=False, encoding="utf-8")
+    print(f"✓ Guardado: {labels_csv_path.name} "
+          f"({df_labels['abandono_30d'].sum()} churners / {len(df_labels)} comercios)")

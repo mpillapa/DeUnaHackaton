@@ -2,11 +2,11 @@
 # Churn Deuna — Makefile de orquestación
 # ═══════════════════════════════════════════════════════════════════════════
 
-.PHONY: all install model frontend clean help
+.PHONY: all install model model-data model-train frontend clean help
 
 # ── Variables ─────────────────────────────────────────────────────────────
-PYTHON  := python
-PIP     := pip
+PYTHON    := python3
+PIP       := pip
 STREAMLIT := streamlit
 
 # ── Targets ──────────────────────────────────────────────────────────────
@@ -29,19 +29,20 @@ install-model: ## Instala solo dependencias del modelo
 install-frontend: ## Instala solo dependencias del frontend
 	$(PIP) install -r frontend/requirements.txt
 
-model: ## Ejecuta el pipeline completo del modelo
-	@echo "🧠 Ejecutando pipeline del modelo..."
-	$(PYTHON) -m model.data_simulation
+model-data: ## Genera las 3 tablas raw + churn_labels
+	@echo "📦 Generando data sintética..."
+	$(PYTHON) -m src.data.generar_dim_merchants
+	$(PYTHON) -m src.data.generar_fact_performance
+	$(PYTHON) -m src.data.generar_fact_support_tickets
+
+model-train: ## Construye MDT, entrena (60/20/20), SHAP y predice
 	$(PYTHON) -m model.feature_engineering
 	$(PYTHON) -m model.train_model
 	$(PYTHON) -m model.explain
 	$(PYTHON) -m model.predict
-	@echo "✅ Pipeline completo. Outputs en outputs/"
 
-model-train: ## Solo entrena el modelo (asume datos ya existen)
-	$(PYTHON) -m model.train_model
-	$(PYTHON) -m model.explain
-	$(PYTHON) -m model.predict
+model: model-data model-train ## Pipeline completo: data → MDT → train → SHAP → scoring
+	@echo "✅ Pipeline completo. Outputs en outputs/"
 
 frontend: ## Levanta el dashboard Streamlit
 	@echo "🎨 Levantando dashboard..."
@@ -55,7 +56,7 @@ clean: ## Limpia artefactos generados
 	rm -rf outputs/figures/*.png
 	rm -rf outputs/predictions.csv
 	rm -rf outputs/shap_values.parquet
-	rm -rf data/raw/*.csv
+	rm -rf data/raw/*.csv data/raw/*.parquet
 	rm -rf data/processed/*.parquet
 	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
 	@echo "🧹 Limpieza completada."

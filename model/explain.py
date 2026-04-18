@@ -1,9 +1,9 @@
 """Explicabilidad del modelo con SHAP.
 
 Genera:
-    - figures/shap_summary.png     : importancia global de variables
-    - figures/shap_bar.png         : barra con top features
-    - outputs/shap_values.parquet  : valores SHAP por comercio (uso individual)
+    outputs/figures/shap_summary.png  — importancia global (beeswarm)
+    outputs/figures/shap_bar.png      — barra con top features
+    outputs/shap_values.parquet       — valores SHAP por comercio (uso individual)
 """
 from __future__ import annotations
 
@@ -23,26 +23,23 @@ from model.train_model import split_features
 
 
 def _transform(pipeline, X: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-    """Aplica el preprocesador y devuelve matriz transformada + nombres de columnas."""
     pre = pipeline.named_steps["pre"]
     X_trans = pre.transform(X)
     feature_names = list(pre.get_feature_names_out())
     return X_trans, feature_names
 
 
-def explain(
-    mdt_path: str | Path | None = None,
-    model_path: str | Path | None = None,
-    fig_dir: str | Path | None = None,
-    shap_out: str | Path | None = None,
-    sample_size: int = 500,
-) -> pd.DataFrame:
-    mdt_path = Path(mdt_path) if mdt_path else PATHS.MDT
+def explain(mdt_path: str | Path | None = None,
+            model_path: str | Path | None = None,
+            fig_dir: str | Path | None = None,
+            shap_out: str | Path | None = None,
+            sample_size: int = 500) -> pd.DataFrame:
+    mdt_path   = Path(mdt_path)   if mdt_path   else PATHS.MDT
     model_path = Path(model_path) if model_path else PATHS.MODEL_PKL
-    fig_dir = Path(fig_dir) if fig_dir else PATHS.FIGURES_DIR
-    shap_out = Path(shap_out) if shap_out else PATHS.SHAP_VALUES
+    fig_dir    = Path(fig_dir)    if fig_dir    else PATHS.FIGURES_DIR
+    shap_out   = Path(shap_out)   if shap_out   else PATHS.SHAP_VALUES
 
-    mdt = pd.read_parquet(mdt_path)
+    mdt      = pd.read_parquet(mdt_path)
     pipeline = joblib.load(model_path)
 
     X, _, _, _ = split_features(mdt)
@@ -57,22 +54,21 @@ def explain(
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     plt.figure()
-    shap.summary_plot(shap_values, X_trans, feature_names=feature_names, show=False, max_display=20)
+    shap.summary_plot(shap_values, X_trans, feature_names=feature_names,
+                       show=False, max_display=20)
     plt.tight_layout()
     plt.savefig(fig_dir / "shap_summary.png", dpi=140, bbox_inches="tight")
     plt.close()
 
     plt.figure()
-    shap.summary_plot(
-        shap_values, X_trans, feature_names=feature_names,
-        plot_type="bar", show=False, max_display=20,
-    )
+    shap.summary_plot(shap_values, X_trans, feature_names=feature_names,
+                       plot_type="bar", show=False, max_display=20)
     plt.tight_layout()
     plt.savefig(fig_dir / "shap_bar.png", dpi=140, bbox_inches="tight")
     plt.close()
 
     shap_df = pd.DataFrame(shap_values, columns=feature_names, index=X_sample.index)
-    shap_df["comercio_id"] = mdt.loc[X_sample.index, "comercio_id"].values
+    shap_df["merchant_id"] = mdt.loc[X_sample.index, "merchant_id"].values
     shap_out.parent.mkdir(parents=True, exist_ok=True)
     shap_df.to_parquet(shap_out, index=False)
 

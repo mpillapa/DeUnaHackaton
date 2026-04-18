@@ -1,8 +1,18 @@
 """Construcción de la MDT (Master Data Table) para el modelo de churn.
 
-Sigue el patrón de ventanas _0, _1, _2, _3, _4 meses del flujo Databricks de referencia:
-cada observación (comercio, fecha_corte) lleva los valores de los últimos 5 meses más
-estadísticos agregados (3m, 6m, 12m), deltas y ratios.
+Combina tres fuentes — dim_merchants, fact_performance_monthly y
+fact_support_tickets — en una fila por comercio con:
+
+    - Variables estáticas  : segmento, región, tipo de negocio, tenure
+    - Lags 0..4            : últimos 5 meses de operación (patrón Databricks)
+    - Agregados 3/6/12 m   : suma, media, std, meses activos
+    - Deltas mes a mes     : aceleración de deterioro
+    - Ratios derivados     : volatilidad, rechazo, tickets por trx
+    - Tickets 6 m          : conteo total, no resueltos, severidad, satisfacción,
+                              desglose por categoría crítica
+
+La fila de cada comercio lleva la etiqueta `abandono_30d` (0/1) obtenida
+del join con churn_labels.csv.
 """
 from __future__ import annotations
 
@@ -14,25 +24,38 @@ import pandas as pd
 
 # Permitir ejecución directa y como módulo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from config.settings import PATHS
+from config.settings import PATHS, FECHA_CORTE
 
 
-ACTIVITY_METRICS = [
-    "n_transacciones",
-    "volumen_total",
+# ── Métricas de performance mensual que se van a "lagear" ──────────────────
+PERFORMANCE_METRICS = [
+    "count_trx",
+    "tpv_mensual",
     "ticket_promedio",
-    "dias_desde_ult_tx",
-    "n_chargebacks",
-    "n_rechazos",
-    "n_tickets_soporte",
-    "dias_resolucion_soporte",
-    "n_integraciones_activas",
+    "tasa_rechazo",
+    "dias_sin_transaccion_max",
+    "dias_desde_ultima_trx",
+    "tickets_soporte_abiertos",
+    "tickets_soporte_resueltos",
+    "tiempo_resolucion_prom_hrs",
+    "severidad_prom_tickets",
 ]
 
-FLAG_METRICS = ["flag_pos_fisico", "flag_ecommerce"]
-
 LAGS = [0, 1, 2, 3, 4]
+WINDOWS = (3, 6, 12)
 
+# Categorías de tickets que queremos exponer individualmente (foco en graves)
+TICKET_CATEGORIAS_FOCO = [
+    "pago_rechazado",
+    "liquidacion_demora",
+    "app_congelada",
+    "facturacion_comisiones",
+]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Features desde fact_performance_monthly
+# ════════════════════════════════════════════════════════════════════════════
 
 def _bucket_recencia(dias: float) -> str:
     if pd.isna(dias):
@@ -48,37 +71,41 @@ def _bucket_recencia(dias: float) -> str:
     return "mas_de_30"
 
 
-def _lag_frame(activity: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
-    """Pivot: una fila por comercio con columnas metric_{lag}."""
+def _lag_frame(performance: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
+    """Pivot: una fila por merchant con columnas metric_{lag}."""
     wide = None
     for lag in LAGS:
         mes = corte - pd.DateOffset(months=lag)
-        snap = activity[activity["fecha_corte"] == mes].copy()
-        snap = snap[["comercio_id", *ACTIVITY_METRICS, *FLAG_METRICS]]
-        rename = {c: f"{c}_{lag}" for c in ACTIVITY_METRICS + FLAG_METRICS}
+        snap = performance[performance["mes_reporte"] == mes].copy()
+        snap = snap[["merchant_id", *PERFORMANCE_METRICS]]
+        rename = {c: f"{c}_{lag}" for c in PERFORMANCE_METRICS}
         snap = snap.rename(columns=rename)
-        wide = snap if wide is None else wide.merge(snap, on="comercio_id", how="outer")
+        wide = snap if wide is None else wide.merge(snap, on="merchant_id", how="outer")
     return wide
 
 
-def _rolling_aggregates(activity: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
+def _rolling_aggregates(performance: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
     """Agregados sobre ventanas de 3, 6 y 12 meses hacia atrás del corte."""
     out = None
-    for window in (3, 6, 12):
+    for window in WINDOWS:
         desde = corte - pd.DateOffset(months=window - 1)
-        ventana = activity[(activity["fecha_corte"] >= desde) & (activity["fecha_corte"] <= corte)]
-        agg = ventana.groupby("comercio_id").agg(
+        ventana = performance[
+            (performance["mes_reporte"] >= desde)
+            & (performance["mes_reporte"] <= corte)
+        ]
+        agg = ventana.groupby("merchant_id").agg(
             **{
-                f"tx_sum_{window}m":        ("n_transacciones", "sum"),
-                f"tx_mean_{window}m":       ("n_transacciones", "mean"),
-                f"tx_std_{window}m":        ("n_transacciones", "std"),
-                f"volumen_sum_{window}m":   ("volumen_total", "sum"),
-                f"volumen_mean_{window}m":  ("volumen_total", "mean"),
-                f"volumen_std_{window}m":   ("volumen_total", "std"),
-                f"chargebacks_sum_{window}m": ("n_chargebacks", "sum"),
-                f"rechazos_sum_{window}m":  ("n_rechazos", "sum"),
-                f"tickets_sum_{window}m":   ("n_tickets_soporte", "sum"),
-                f"meses_activos_{window}m": ("n_transacciones", lambda s: int((s > 0).sum())),
+                f"tx_sum_{window}m":            ("count_trx", "sum"),
+                f"tx_mean_{window}m":           ("count_trx", "mean"),
+                f"tx_std_{window}m":            ("count_trx", "std"),
+                f"tpv_sum_{window}m":           ("tpv_mensual", "sum"),
+                f"tpv_mean_{window}m":          ("tpv_mensual", "mean"),
+                f"tpv_std_{window}m":           ("tpv_mensual", "std"),
+                f"rechazo_mean_{window}m":      ("tasa_rechazo", "mean"),
+                f"rechazo_max_{window}m":       ("tasa_rechazo", "max"),
+                f"tickets_sum_{window}m":       ("tickets_soporte_abiertos", "sum"),
+                f"tiempo_res_mean_{window}m":   ("tiempo_resolucion_prom_hrs", "mean"),
+                f"meses_activos_{window}m":     ("count_trx", lambda s: int((s > 0).sum())),
             }
         )
         out = agg if out is None else out.join(agg, how="outer")
@@ -86,10 +113,11 @@ def _rolling_aggregates(activity: pd.DataFrame, corte: pd.Timestamp) -> pd.DataF
 
 
 def _deltas(wide: pd.DataFrame) -> pd.DataFrame:
-    """Deltas mensuales consecutivos sobre métricas clave (replica patrón DeltaSaldoX_Y)."""
+    """Deltas mensuales consecutivos sobre métricas clave."""
     df = wide.copy()
-    for metric in ["n_transacciones", "volumen_total", "ticket_promedio",
-                   "dias_desde_ult_tx", "n_tickets_soporte"]:
+    for metric in ["count_trx", "tpv_mensual", "ticket_promedio",
+                   "tasa_rechazo", "dias_desde_ultima_trx",
+                   "tickets_soporte_abiertos"]:
         for newer, older in [(0, 1), (1, 2), (2, 3), (3, 4)]:
             col_new = f"{metric}_{newer}"
             col_old = f"{metric}_{older}"
@@ -98,77 +126,152 @@ def _deltas(wide: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Features desde fact_support_tickets (ventana 6 meses)
+# ════════════════════════════════════════════════════════════════════════════
+
+def _ticket_aggregates(tickets: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
+    """Agregados a 6 meses de la tabla granular de tickets."""
+    desde = corte - pd.DateOffset(months=5)  # ventana de 6 meses incluyendo el corte
+    hasta = corte + pd.DateOffset(months=1)  # hasta cierre del mes de corte
+
+    tk = tickets[
+        (tickets["fecha_apertura"] >= desde)
+        & (tickets["fecha_apertura"] < hasta)
+    ].copy()
+
+    # Flags derivados
+    tk["es_no_resuelto"] = tk["estado"].isin(["abierto", "en_proceso", "escalado"]).astype(int)
+    tk["es_escalado"]    = (tk["estado"] == "escalado").astype(int)
+
+    agg = tk.groupby("merchant_id").agg(
+        tickets_total_6m=       ("ticket_id", "count"),
+        tickets_no_resueltos_6m=("es_no_resuelto", "sum"),
+        tickets_escalados_6m=   ("es_escalado", "sum"),
+        severidad_max_6m=       ("severidad", "max"),
+        severidad_mean_6m=      ("severidad", "mean"),
+        tiempo_res_max_6m=      ("tiempo_resolucion_hrs", "max"),
+        satisfaccion_mean_6m=   ("satisfaccion_post_cierre", "mean"),
+    ).reset_index()
+
+    # Desglose por categoría crítica
+    for cat in TICKET_CATEGORIAS_FOCO:
+        cat_counts = (
+            tk[tk["categoria"] == cat]
+            .groupby("merchant_id")
+            .size()
+            .rename(f"tickets_{cat}_6m")
+            .reset_index()
+        )
+        agg = agg.merge(cat_counts, on="merchant_id", how="left")
+
+    return agg
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Features estáticos de dim_merchants
+# ════════════════════════════════════════════════════════════════════════════
+
+def _static_features(merchants: pd.DataFrame, corte: pd.Timestamp) -> pd.DataFrame:
+    df = merchants[[
+        "merchant_id", "segmento_comercial", "region",
+        "tipo_negocio_ciiu", "tipo_negocio_desc", "ejecutivo_cuenta",
+        "fecha_onboarding",
+    ]].copy()
+
+    df["fecha_onboarding"] = pd.to_datetime(df["fecha_onboarding"])
+    df["tenure_meses"] = ((corte - df["fecha_onboarding"]).dt.days / 30).round(1)
+    df["es_auto_gestionado"] = (df["ejecutivo_cuenta"] == "Auto-gestionado").astype(int)
+
+    return df.drop(columns=["fecha_onboarding", "ejecutivo_cuenta", "tipo_negocio_ciiu"])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Orquestación
+# ════════════════════════════════════════════════════════════════════════════
+
 def build_mdt(
     merchants: pd.DataFrame,
-    activity: pd.DataFrame,
+    performance: pd.DataFrame,
+    tickets: pd.DataFrame,
+    labels: pd.DataFrame | None = None,
     fecha_corte: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    activity = activity.copy()
-    activity["fecha_corte"] = pd.to_datetime(activity["fecha_corte"])
+    """Construye la MDT cross-sectional a la fecha de corte.
 
-    if fecha_corte is None:
-        fecha_corte = activity["fecha_corte"].max()
-    else:
-        fecha_corte = pd.Timestamp(fecha_corte)
+    Si `labels` es None la MDT no incluye la columna target (modo inferencia).
+    """
+    performance = performance.copy()
+    performance["mes_reporte"] = pd.to_datetime(performance["mes_reporte"])
 
-    wide = _lag_frame(activity, fecha_corte)
-    agg = _rolling_aggregates(activity, fecha_corte)
-    mdt = wide.merge(agg, on="comercio_id", how="left")
+    tickets = tickets.copy()
+    tickets["fecha_apertura"] = pd.to_datetime(tickets["fecha_apertura"])
+
+    corte = (
+        pd.Timestamp(fecha_corte) if fecha_corte is not None
+        else performance["mes_reporte"].max()
+    )
+
+    wide    = _lag_frame(performance, corte)
+    rolling = _rolling_aggregates(performance, corte)
+    tk_agg  = _ticket_aggregates(tickets, corte)
+    static  = _static_features(merchants, corte)
+
+    mdt = static.merge(wide,    on="merchant_id", how="left")
+    mdt = mdt.merge(rolling,    on="merchant_id", how="left")
+    mdt = mdt.merge(tk_agg,     on="merchant_id", how="left")
+
+    mdt["fecha_corte"] = corte
+    mdt["recencia_bucket_0"] = mdt["dias_desde_ultima_trx_0"].apply(_bucket_recencia)
+
+    # Ratios derivados (con guardas contra div/0)
+    tx6 = mdt["tx_sum_6m"].replace(0, np.nan)
+    mdt["tickets_per_tx_6m"]      = (mdt["tickets_sum_6m"] / tx6).fillna(0)
+    mdt["volatilidad_tx_6m"]      = (mdt["tx_std_6m"] / mdt["tx_mean_6m"].replace(0, np.nan)).fillna(0)
+    mdt["volatilidad_tpv_6m"]     = (mdt["tpv_std_6m"] / mdt["tpv_mean_6m"].replace(0, np.nan)).fillna(0)
+    mdt["tasa_no_resuelto_6m"]    = (
+        mdt["tickets_no_resueltos_6m"] / mdt["tickets_total_6m"].replace(0, np.nan)
+    ).fillna(0)
+
+    # Deltas (requieren las columnas de lag ya presentes)
     mdt = _deltas(mdt)
 
-    mdt["fecha_corte"] = fecha_corte
-
-    mdt = mdt.merge(
-        merchants[["comercio_id", "mcc", "mcc_segmento", "region",
-                   "tipo_persona", "tenure_meses"]],
-        on="comercio_id",
-        how="left",
-    )
-
-    mdt["recencia_bucket_0"] = mdt["dias_desde_ult_tx_0"].apply(_bucket_recencia)
-
-    tx6 = mdt["tx_sum_6m"].replace(0, np.nan)
-    mdt["chargeback_rate_6m"] = (mdt["chargebacks_sum_6m"] / tx6).fillna(0)
-    mdt["decline_rate_6m"]    = (mdt["rechazos_sum_6m"] / tx6).fillna(0)
-    mdt["tickets_per_tx_6m"]  = (mdt["tickets_sum_6m"] / tx6).fillna(0)
-
-    mdt["volatilidad_volumen_6m"] = (
-        mdt["volumen_std_6m"] / mdt["volumen_mean_6m"].replace(0, np.nan)
-    ).fillna(0)
-    mdt["volatilidad_tx_6m"] = (
-        mdt["tx_std_6m"] / mdt["tx_mean_6m"].replace(0, np.nan)
-    ).fillna(0)
-
-    mdt["omnicanal_0"] = (
-        mdt.get("flag_pos_fisico_0", 0).fillna(0).astype(int)
-        + mdt.get("flag_ecommerce_0", 0).fillna(0).astype(int)
-    )
-
+    # Relleno para numéricos faltantes (comercios con historia corta,
+    # sin tickets, etc.)
     numeric_cols = mdt.select_dtypes(include=[np.number]).columns
     mdt[numeric_cols] = mdt[numeric_cols].fillna(0)
+
+    # Target
+    if labels is not None:
+        mdt = mdt.merge(labels[["merchant_id", "abandono_30d"]],
+                        on="merchant_id", how="left")
+        mdt["abandono_30d"] = mdt["abandono_30d"].fillna(0).astype(int)
 
     return mdt
 
 
-def main(
-    raw_dir: str | Path | None = None,
-    out_dir: str | Path | None = None,
-) -> Path:
+def main(raw_dir: str | Path | None = None,
+         out_dir: str | Path | None = None) -> Path:
     raw_dir = Path(raw_dir) if raw_dir else PATHS.RAW_DIR
     out_dir = Path(out_dir) if out_dir else PATHS.PROCESSED_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    merchants = pd.read_csv(raw_dir / "merchants.csv")
-    activity = pd.read_csv(raw_dir / "monthly_activity.csv", parse_dates=["fecha_corte"])
-    labels = pd.read_csv(raw_dir / "churn_labels.csv", parse_dates=["fecha_corte"])
+    merchants   = pd.read_csv(raw_dir / "dim_merchants.csv")
+    performance = pd.read_csv(raw_dir / "fact_performance_monthly.csv",
+                              parse_dates=["mes_reporte"])
+    tickets     = pd.read_csv(raw_dir / "fact_support_tickets.csv",
+                              parse_dates=["fecha_apertura", "fecha_cierre"])
+    labels      = pd.read_csv(raw_dir / "churn_labels.csv")
 
-    mdt = build_mdt(merchants, activity)
-    mdt = mdt.merge(labels[["comercio_id", "churn_30d"]], on="comercio_id", how="left")
+    mdt = build_mdt(merchants, performance, tickets, labels,
+                    fecha_corte=pd.Timestamp(FECHA_CORTE))
 
     out_path = out_dir / "mdt_churn.parquet"
     mdt.to_parquet(out_path, index=False)
+
     print(f"MDT construida: {mdt.shape[0]} filas x {mdt.shape[1]} columnas → {out_path}")
-    print(f"Tasa de churn: {mdt['churn_30d'].mean():.2%}")
+    print(f"Tasa de churn:  {mdt['abandono_30d'].mean():.2%}")
+    print(f"Fecha corte:    {mdt['fecha_corte'].iloc[0].date()}")
     return out_path
 
 

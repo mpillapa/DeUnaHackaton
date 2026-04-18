@@ -14,7 +14,8 @@
  promedien 3.2 y con las demás métricas consistentes.
 
  Requisitos previos:
- - dim_merchants_con_abandono.csv (Tabla 1 + etiqueta)
+ - dim_merchants.csv (Tabla 1)
+ - churn_labels.csv (etiqueta ground truth, se genera junto con Tabla 2)
  - fact_performance_monthly.csv (Tabla 2)
 
  Output: fact_support_tickets.csv
@@ -424,24 +425,29 @@ def validar_dataset(df_tickets: pd.DataFrame,
 
 if __name__ == "__main__":
     # 1. Cargar tablas previas
-    merchants_path = PATHS.RAW_DIR / "dim_merchants_con_abandono.csv"
+    merchants_path = PATHS.RAW_DIR / "dim_merchants.csv"
+    labels_path = PATHS.RAW_DIR / "churn_labels.csv"
     performance_path = PATHS.RAW_DIR / "fact_performance_monthly.csv"
 
-    if not merchants_path.exists():
-        raise FileNotFoundError(
-            f"No se encuentra {merchants_path}. "
-            "Ejecuta primero generar_fact_performance.py."
-        )
-    if not performance_path.exists():
-        raise FileNotFoundError(
-            f"No se encuentra {performance_path}. "
-            "Ejecuta primero generar_fact_performance.py."
-        )
+    for required in (merchants_path, labels_path, performance_path):
+        if not required.exists():
+            raise FileNotFoundError(
+                f"No se encuentra {required}. "
+                "Ejecuta primero generar_dim_merchants.py y generar_fact_performance.py."
+            )
 
-    df_merchants = pd.read_csv(merchants_path)
+    df_merchants_base = pd.read_csv(merchants_path)
+    df_labels = pd.read_csv(labels_path)
     df_performance = pd.read_csv(performance_path)
-    print(f"✓ Cargado {merchants_path.name}: {len(df_merchants):,} comercios")
-    print(f"✓ Cargado {performance_path.name}:   {len(df_performance):,} filas\n")
+
+    # El generador necesita la etiqueta para modular la severidad de tickets
+    # en churners — la unimos solo en memoria (no persistimos la mezcla).
+    df_merchants = df_merchants_base.merge(df_labels, on="merchant_id", how="left")
+    df_merchants["abandono_30d"] = df_merchants["abandono_30d"].fillna(0).astype(int)
+
+    print(f"✓ Cargado {merchants_path.name}:    {len(df_merchants_base):,} comercios")
+    print(f"✓ Cargado {labels_path.name}:       {df_labels['abandono_30d'].sum()} churners")
+    print(f"✓ Cargado {performance_path.name}:  {len(df_performance):,} filas\n")
 
     # 2. Generar Tabla 4
     print("Generando tickets de soporte individuales...")
