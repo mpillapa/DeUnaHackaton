@@ -29,6 +29,8 @@
 """
 
 import os
+import json
+import joblib
 import numpy as np
 import pandas as pd
 from datetime import datetime
@@ -113,22 +115,42 @@ X, y, df_full = construir_dataset_features(
 merchant_ids = df_full["merchant_id"].values
 feature_names = X.columns.tolist()
 
+# ── Guardar feature_columns.json (contrato con frontend) ─────────────────────
+numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+categorical_cols = [c for c in feature_names if c not in numeric_cols]
+feature_cols_path = os.path.join(OUTPUT_DIR, "feature_columns.json")
+with open(feature_cols_path, "w", encoding="utf-8") as f:
+    json.dump({"numeric": numeric_cols, "categorical": categorical_cols},
+              f, indent=2, ensure_ascii=False)
+print(f"✓ Guardado: {feature_cols_path} "
+      f"({len(numeric_cols)} num + {len(categorical_cols)} cat)")
+
 # ============================================================
 # 2. SPLIT TRAIN/TEST ESTRATIFICADO
 # ============================================================
 print("\n" + "=" * 70)
-print("PASO 2: SPLIT TRAIN/TEST ESTRATIFICADO (80/20)")
+print("PASO 2: SPLIT TRAIN/VAL/TEST ESTRATIFICADO (60/20/20)")
 print("=" * 70)
 
-X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
+# Primer split: 80% train+val / 20% test
+X_trainval, X_test, y_trainval, y_test, idx_trainval, idx_test = train_test_split(
     X, y, np.arange(len(X)),
     test_size=0.20, stratify=y, random_state=SEED
 )
+# Segundo split: 75% train / 25% val (→ 60% / 20% del total)
+X_train, X_val, y_train, y_val, idx_train, idx_val = train_test_split(
+    X_trainval, y_trainval, np.arange(len(X_trainval)),
+    test_size=0.25, stratify=y_trainval, random_state=SEED
+)
+idx_train = idx_trainval[idx_train]
+idx_val   = idx_trainval[idx_val]
 
 merchant_ids_train = merchant_ids[idx_train]
-merchant_ids_test = merchant_ids[idx_test]
+merchant_ids_val   = merchant_ids[idx_val]
+merchant_ids_test  = merchant_ids[idx_test]
 
 print(f"Train: {len(X_train)} comercios ({y_train.mean()*100:.1f}% churners)")
+print(f"Val:   {len(X_val)} comercios ({y_val.mean()*100:.1f}% churners)")
 print(f"Test:  {len(X_test)} comercios ({y_test.mean()*100:.1f}% churners)")
 
 # Calcular scale_pos_weight para manejar desbalance
@@ -282,6 +304,11 @@ xgb_final = search.best_estimator_
 y_pred_final = xgb_final.predict(X_test)
 y_proba_final = xgb_final.predict_proba(X_test)[:, 1]
 
+# ── Guardar modelo serializado (contrato de datos) ──────────────────────────
+model_path = os.path.join(OUTPUT_DIR, "churn_model.pkl")
+joblib.dump(xgb_final, model_path)
+print(f"\n✓ Guardado: {model_path}")
+
 print(f"\nEvaluación del modelo tuneado en test:")
 print(f"  AUC:       {roc_auc_score(y_test, y_proba_final):.4f}")
 print(f"  Precision: {precision_score(y_test, y_pred_final):.4f}")
@@ -291,6 +318,46 @@ print(f"  F1:        {f1_score(y_test, y_pred_final):.4f}")
 print(f"\nClassification report:")
 print(classification_report(y_test, y_pred_final,
                              target_names=["Activo (0)", "Churn (1)"]))
+
+# ── Threshold óptimo (máximo F1 en validación) ──────────────────────────────
+y_proba_val = xgb_final.predict_proba(X_val)[:, 1]
+prec_vals, rec_vals, thr_vals = precision_recall_curve(y_val, y_proba_val)
+f1_vals = 2 * prec_vals[:-1] * rec_vals[:-1] / (prec_vals[:-1] + rec_vals[:-1] + 1e-9)
+best_thr = float(thr_vals[np.argmax(f1_vals)])
+print(f"\nUmbral óptimo F1 (val): {best_thr:.4f}")
+
+# ── Métricas por split con threshold óptimo ──────────────────────────────────
+def _split_metrics(y_true, y_proba, thr):
+    y_pred = (y_proba >= thr).astype(int)
+    pr, rc, _ = precision_recall_curve(y_true, y_proba)
+    return {
+        "n":           int(len(y_true)),
+        "churn_rate":  round(float(y_true.mean()), 4),
+        "auc_roc":     round(float(roc_auc_score(y_true, y_proba)), 4),
+        "auc_pr":      round(float(np.trapezoid(rc, pr) * -1), 4),  # area bajo PR
+        "precision":   round(float(precision_score(y_true, y_pred, zero_division=0)), 4),
+        "recall":      round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
+        "f1":          round(float(f1_score(y_true, y_pred, zero_division=0)), 4),
+    }
+
+y_proba_train = xgb_final.predict_proba(X_train)[:, 1]
+
+metrics_dict = {
+    "threshold":        round(best_thr, 4),
+    "best_iteration":   int(xgb_final.best_iteration) if hasattr(xgb_final, "best_iteration") and xgb_final.best_iteration is not None else None,
+    "scale_pos_weight": round(float(scale_pos_weight), 4),
+    "splits": {
+        "train": _split_metrics(y_train, y_proba_train, best_thr),
+        "val":   _split_metrics(y_val,   y_proba_val,   best_thr),
+        "test":  _split_metrics(y_test,  y_proba_final, best_thr),
+    },
+    "n_features_in": int(X.shape[1]),
+}
+
+metrics_path = os.path.join(OUTPUT_DIR, "metrics.json")
+with open(metrics_path, "w", encoding="utf-8") as f:
+    json.dump(metrics_dict, f, indent=2)
+print(f"\n✓ Guardado: {metrics_path}")
 
 # Matriz de confusión
 cm = confusion_matrix(y_test, y_pred_final)
@@ -322,6 +389,23 @@ importancia_global = pd.DataFrame({
 print(f"\nTop 10 features más influyentes (SHAP global):")
 print(importancia_global.head(10).to_string(index=False))
 importancia_global.to_csv(f"{OUTPUT_DIR}/importancia_features.csv", index=False)
+
+# ── Guardar shap_values.parquet (contrato con frontend) ──────────────────────
+# Muestra de 500 comercios para mantener el archivo ligero
+N_SHAP_SAMPLE = min(500, len(X))
+rng = np.random.default_rng(SEED)
+sample_idx = rng.choice(len(X), size=N_SHAP_SAMPLE, replace=False)
+
+df_shap = pd.DataFrame(
+    shap_values_all[sample_idx],
+    columns=[f"shap_{c}" for c in feature_names],
+)
+df_shap.insert(0, "merchant_id", merchant_ids[sample_idx])
+df_shap.insert(1, "base_value", float(explainer.expected_value))
+
+shap_parquet_path = os.path.join(OUTPUT_DIR, "shap_values.parquet")
+df_shap.to_parquet(shap_parquet_path, index=False)
+print(f"✓ Guardado: {shap_parquet_path} ({len(df_shap)} comercios)")
 
 # ============================================================
 # 7. GENERACIÓN DE TABLA 3 (fact_churn_predictions)
