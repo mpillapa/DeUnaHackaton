@@ -5,6 +5,7 @@ import plotly.express as px
 import textwrap
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # ==========================================
 # 1. CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
@@ -118,8 +119,9 @@ import pandas as pd
 
 @st.cache_data  # 🚀 Esto guarda el CSV en memoria para que los filtros vuelen
 def load_data():
-    # 1. Cargamos el CSV. Usamos sep=None para que Pandas autodetecte si es coma (,) o punto y coma (;)
-    df = pd.read_csv(r"outputs_modelo\fact_churn_predictions.csv", sep=None, engine='python')
+    # 1. Cargamos el CSV usando pathlib para que sea independiente del sistema
+    data_path = Path(__file__).resolve().parent.parent.parent / "outputs_modelo" / "fact_churn_predictions.csv"
+    df = pd.read_csv(data_path, sep=None, engine='python')
     
     # 2. Limpiamos los nombres de las columnas por si tienen espacios en blanco invisibles al inicio o al final
     df.columns = df.columns.str.strip()
