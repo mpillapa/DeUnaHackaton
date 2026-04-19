@@ -334,7 +334,7 @@ def _split_metrics(y_true, y_proba, thr):
         "n":           int(len(y_true)),
         "churn_rate":  round(float(y_true.mean()), 4),
         "auc_roc":     round(float(roc_auc_score(y_true, y_proba)), 4),
-        "auc_pr":      round(float(np.trapezoid(rc, pr) * -1), 4),  # area bajo PR
+        "auc_pr":      round(abs(float(np.trapezoid(rc, pr))), 4),
         "precision":   round(float(precision_score(y_true, y_pred, zero_division=0)), 4),
         "recall":      round(float(recall_score(y_true, y_pred, zero_division=0)), 4),
         "f1":          round(float(f1_score(y_true, y_pred, zero_division=0)), 4),

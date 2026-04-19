@@ -7,7 +7,7 @@
       "n": 1200,
       "churn_rate": 0.13,
       "auc_roc": 0.9991,
-      "auc_pr": -0.8625,
+      "auc_pr": 0.8625,
       "precision": 0.9506,
       "recall": 0.9872,
       "f1": 0.9686
@@ -16,7 +16,7 @@
       "n": 400,
       "churn_rate": 0.13,
       "auc_roc": 0.9062,
-      "auc_pr": -0.6572,
+      "auc_pr": 0.6572,
       "precision": 0.8409,
       "recall": 0.7115,
       "f1": 0.7708
@@ -25,7 +25,7 @@
       "n": 400,
       "churn_rate": 0.13,
       "auc_roc": 0.9366,
-      "auc_pr": -0.6734,
+      "auc_pr": 0.6734,
       "precision": 0.814,
       "recall": 0.6731,
       "f1": 0.7368
