@@ -113,76 +113,77 @@ st.markdown("""
 # ==========================================
 # 2. CARGA DE DATOS (MOCKUP / REAL)
 # ==========================================
-@st.cache_data
+import streamlit as st
+import pandas as pd
+
+@st.cache_data  # 🚀 Esto guarda el CSV en memoria para que los filtros vuelen
 def load_data():
-    """
-    Intenta cargar los datos reales. Si no existen, genera un dataset mock 
-    basado exactamente en la estructura del Documento de Referencia (Sección 7 y 9).
-    """
-    try:
-        # Aquí iría tu lógica real:
-        # df = pd.read_csv("dataset_unificado_con_predicciones.csv")
-        raise FileNotFoundError # Forzamos el mock para demostración
-    except FileNotFoundError:
-        np.random.seed(42)
-        n = 2000
-        
-        # Generar IDs
-        merchant_ids = [f"DEU-{str(i).zfill(8)}" for i in range(1, n + 1)]
-        
-        # Variables estáticas
-        regiones = np.random.choice(["Pichincha", "Guayas", "Azuay", "Manabí", "Resto"], n, p=[0.30, 0.25, 0.08, 0.07, 0.30])
-        segmentos = np.random.choice(["Microempresa", "Pequeña", "Mediana", "Grande"], n, p=[0.90, 0.07, 0.025, 0.005])
-        sectores = np.random.choice(["Comercio al por menor", "Restaurantes", "Servicios personales", "Alimentos/bebidas", "Transporte"], n)
-        
-        # Coordenadas base (Quito y Guayaquil aproximadas) con ruido
-        lats = np.where(regiones == "Pichincha", -0.22 + np.random.normal(0, 0.05, n), -2.18 + np.random.normal(0, 0.05, n))
-        lons = np.where(regiones == "Pichincha", -78.52 + np.random.normal(0, 0.05, n), -79.88 + np.random.normal(0, 0.05, n))
-        
-        # Fechas de onboarding (cohorte)
-        today = datetime(2026, 3, 1)
-        fechas_onboarding = [today - timedelta(days=np.random.randint(30, 1000)) for _ in range(n)]
-        meses_onboarding = [f"{d.year}-{str(d.month).zfill(2)}" for d in fechas_onboarding]
+    # 1. Cargamos el CSV. Usamos sep=None para que Pandas autodetecte si es coma (,) o punto y coma (;)
+    df = pd.read_csv(r"outputs_modelo\fact_churn_predictions.csv", sep=None, engine='python')
+    
+    # 2. Limpiamos los nombres de las columnas por si tienen espacios en blanco invisibles al inicio o al final
+    df.columns = df.columns.str.strip()
+    
+    return df
 
-        # Features Temporales
-        tpv = np.where(segmentos=="Microempresa", np.random.uniform(100, 2000, n), np.random.uniform(2000, 50000, n))
+    #     n = 2000
         
-        # Salida del modelo (Predicciones)
-        prob_churn = np.random.beta(0.5, 3.5, n) # Mayoría sana, cola larga de riesgo
+    #     # Generar IDs
+    #     merchant_ids = [f"DEU-{str(i).zfill(8)}" for i in range(1, n + 1)]
         
-        niveles = []
-        for p in prob_churn:
-            if p > 0.75: niveles.append("Crítico")
-            elif p > 0.50: niveles.append("Alto")
-            elif p > 0.25: niveles.append("Medio")
-            else: niveles.append("Bajo")
+    #     # Variables estáticas
+    #     regiones = np.random.choice(["Pichincha", "Guayas", "Azuay", "Manabí", "Resto"], n, p=[0.30, 0.25, 0.08, 0.07, 0.30])
+    #     segmentos = np.random.choice(["Microempresa", "Pequeña", "Mediana", "Grande"], n, p=[0.90, 0.07, 0.025, 0.005])
+    #     sectores = np.random.choice(["Comercio al por menor", "Restaurantes", "Servicios personales", "Alimentos/bebidas", "Transporte"], n)
+        
+    #     # Coordenadas base (Quito y Guayaquil aproximadas) con ruido
+    #     lats = np.where(regiones == "Pichincha", -0.22 + np.random.normal(0, 0.05, n), -2.18 + np.random.normal(0, 0.05, n))
+    #     lons = np.where(regiones == "Pichincha", -78.52 + np.random.normal(0, 0.05, n), -79.88 + np.random.normal(0, 0.05, n))
+        
+    #     # Fechas de onboarding (cohorte)
+    #     today = datetime(2026, 3, 1)
+    #     fechas_onboarding = [today - timedelta(days=np.random.randint(30, 1000)) for _ in range(n)]
+    #     meses_onboarding = [f"{d.year}-{str(d.month).zfill(2)}" for d in fechas_onboarding]
+
+    #     # Features Temporales
+    #     tpv = np.where(segmentos=="Microempresa", np.random.uniform(100, 2000, n), np.random.uniform(2000, 50000, n))
+        
+    #     # Salida del modelo (Predicciones)
+    #     prob_churn = np.random.beta(0.5, 3.5, n) # Mayoría sana, cola larga de riesgo
+        
+    #     niveles = []
+    #     for p in prob_churn:
+    #         if p > 0.75: niveles.append("Crítico")
+    #         elif p > 0.50: niveles.append("Alto")
+    #         elif p > 0.25: niveles.append("Medio")
+    #         else: niveles.append("Bajo")
             
-        clv = tpv * np.random.uniform(6, 24, n) # LTV proyectado simple
+    #     clv = tpv * np.random.uniform(6, 24, n) # LTV proyectado simple
         
-        drivers_opciones = ["ratio_tpv_3m_vs_12m", "tasa_rechazo_max_90d", "tiempo_resolucion_prom_90d", "dias_desde_ultima_trx", "tickets_no_resueltos"]
-        nba_opciones = ["Llamada KAM Inmediata", "Descuento en comisión 30d", "Revisión Técnica QR", "Campaña SMS Reactivación", "Visita de campo"]
+    #     drivers_opciones = ["ratio_tpv_3m_vs_12m", "tasa_rechazo_max_90d", "tiempo_resolucion_prom_90d", "dias_desde_ultima_trx", "tickets_no_resueltos"]
+    #     nba_opciones = ["Llamada KAM Inmediata", "Descuento en comisión 30d", "Revisión Técnica QR", "Campaña SMS Reactivación", "Visita de campo"]
 
-        df = pd.DataFrame({
-            "merchant_id": merchant_ids,
-            "nombre_comercio": [f"Comercio {i}" for i in range(1, n+1)],
-            "region": regiones,
-            "segmento_comercial": segmentos,
-            "tipo_negocio_desc": sectores,
-            "latitud": lats,
-            "longitud": lons,
-            "mes_onboarding": meses_onboarding,
-            "tpv_mensual_promedio": tpv,
-            "probabilidad_churn": prob_churn,
-            "nivel_riesgo": niveles,
-            "clv_proyectado": clv,
-            "score_salud": (1 - prob_churn) * 100,
-            "driver_1_nombre": np.random.choice(drivers_opciones, n),
-            "driver_1_shap": np.random.uniform(0.1, 0.5, n),
-            "driver_2_nombre": np.random.choice(drivers_opciones, n),
-            "driver_2_shap": np.random.uniform(0.05, 0.2, n),
-            "nba_sugerida": np.random.choice(nba_opciones, n)
-        })
-        return df
+    #     df = pd.DataFrame({
+    #         "merchant_id": merchant_ids,
+    #         "nombre_comercio": [f"Comercio {i}" for i in range(1, n+1)],
+    #         "region": regiones,
+    #         "segmento_comercial": segmentos,
+    #         "tipo_negocio_desc": sectores,
+    #         "latitud": lats,
+    #         "longitud": lons,
+    #         "mes_onboarding": meses_onboarding,
+    #         "tpv_mensual_promedio": tpv,
+    #         "probabilidad_churn": prob_churn,
+    #         "nivel_riesgo": niveles,
+    #         "clv_proyectado": clv,
+    #         "score_salud": (1 - prob_churn) * 100,
+    #         "driver_1_nombre": np.random.choice(drivers_opciones, n),
+    #         "driver_1_shap": np.random.uniform(0.1, 0.5, n),
+    #         "driver_2_nombre": np.random.choice(drivers_opciones, n),
+    #         "driver_2_shap": np.random.uniform(0.05, 0.2, n),
+    #         "nba_sugerida": np.random.choice(nba_opciones, n)
+    #     })
+    return df
 
 df = load_data()
 
